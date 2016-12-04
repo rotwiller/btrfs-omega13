@@ -1,0 +1,11 @@
+[package]
+name = "btrfs-omega13"
+version = "0.1.0"
+authors = ["James Pharaoh <james@pharaoh.uk>"]
+
+[dependencies]
+btrfs = "*"
+clap = "*"
+output = "*"
+memmap = "*"
+uuid = "*"
