@@ -1,20 +1,17 @@
 use std::collections::HashMap;
-use std::collections::HashSet;
-use std::error::Error;
-use std::fs::File;
 use std::mem;
 use std::rc::Rc;
 
 use btrfs::diskformat::*;
 
 use memmap::Mmap;
-use memmap::Protection;
 
-use output;
 use output::OutputBox;
 
-use arguments::*;
-use index::*;
+type InodeItemAndKey <'a> = (
+	& 'a BtrfsLeafNodeHeader,
+	& 'a BtrfsInodeItem,
+);
 
 type DirItemAndKey <'a> = (
 	& 'a BtrfsLeafNodeHeader,
@@ -27,6 +24,10 @@ pub struct Filesystem <'a> {
 	mmaps: & 'a [Mmap],
 
 	item_index: HashMap <Rc <BtrfsKey>, Vec <usize>>,
+
+	inode_items: Vec <InodeItemAndKey <'a>>,
+	inode_items_index: HashMap <i64, Vec <InodeItemAndKey <'a>>>,
+	inode_items_recent: HashMap <i64, InodeItemAndKey <'a>>,
 
 	dir_items: Vec <DirItemAndKey <'a>>,
 	dir_items_index: HashMap <i64, Vec <DirItemAndKey <'a>>>,
@@ -49,6 +50,10 @@ impl <'a> Filesystem <'a> {
 
 			item_index: HashMap::new (),
 
+			inode_items: Vec::new (),
+			inode_items_index: HashMap::new (),
+			inode_items_recent: HashMap::new (),
+
 			dir_items: Vec::new (),
 			dir_items_index: HashMap::new (),
 			dir_items_recent: HashMap::new (),
@@ -58,27 +63,13 @@ impl <'a> Filesystem <'a> {
 
 	}
 
-	pub fn index (
+	pub fn build_main_index (
 		& mut self,
 		output: & mut OutputBox,
 	) {
 
-		self.build_main_index (
-			output);
-
-		self.build_dir_items_recent (
-			output);
-
-		self.build_dir_items_by_parent (
-			output);
-
-
-	}
-
-	fn build_main_index (
-		& mut self,
-		output: & mut OutputBox,
-	) {
+		output.status (
+			"Building main index ...");
 
 		let mmap =
 			& self.mmaps [0];
@@ -149,6 +140,33 @@ impl <'a> Filesystem <'a> {
 
 				match leaf_node_header.key.item_type {
 
+					BTRFS_INODE_ITEM_TYPE => {
+
+						let inode_item: & BtrfsInodeItem = unsafe {
+							& * (
+								mmap.ptr ().offset (
+									item_data_position as isize,
+								) as * const BtrfsInodeItem
+							)
+						};
+
+						let inode_item_and_header = (
+							leaf_node_header,
+							inode_item,
+						);
+
+						self.inode_items.push (
+							inode_item_and_header);
+
+						self.inode_items_index.entry (
+							item_key.object_id,
+						).or_insert (
+							Vec::new (),
+						).push (
+							inode_item_and_header);
+
+					},
+
 					BTRFS_DIR_INDEX_TYPE => {
 
 						let dir_item: & BtrfsDirItem = unsafe {
@@ -184,12 +202,50 @@ impl <'a> Filesystem <'a> {
 
 		}
 
+		output.status_done ();
+
 	}
 
-	fn build_dir_items_recent (
+	pub fn build_inode_items_index (
 		& mut self,
 		output: & mut OutputBox,
 	) {
+
+		output.status (
+			"Selecting most recent inode items ...");
+
+		for & (leaf_node_header, inode_item)
+		in self.inode_items.iter () {
+
+			let map_inode_item_and_key =
+				self.inode_items_recent.entry (
+					leaf_node_header.key.object_id,
+				).or_insert (
+					(leaf_node_header, inode_item)
+				);
+
+			if map_inode_item_and_key.1.transid < inode_item.transid {
+
+				* map_inode_item_and_key = (
+					leaf_node_header,
+					inode_item,
+				);
+
+			}
+
+		}
+
+		output.status_done ();
+
+	}
+
+	pub fn build_dir_items_index (
+		& mut self,
+		output: & mut OutputBox,
+	) {
+
+		output.status (
+			"Selecting most recent directory items ...");
 
 		for & (leaf_node_header, dir_item)
 		in self.dir_items.iter () {
@@ -212,12 +268,10 @@ impl <'a> Filesystem <'a> {
 
 		}
 
-	}
+		output.status_done ();
 
-	fn build_dir_items_by_parent (
-		& mut self,
-		output: & mut OutputBox,
-	) {
+		output.status (
+			"Grouping directory items by parent ...");
 
 		for & (leaf_node_header, dir_item)
 		in self.dir_items_recent.values () {
@@ -231,89 +285,26 @@ impl <'a> Filesystem <'a> {
 
 		}
 
-	}
-
-	pub fn print_roots (
-		& mut self,
-		output: & mut OutputBox,
-	) {
-
-		// find parent dir entries
-
-		let root_object_ids: HashSet <i64> =
-			self.dir_items_recent.values ().filter (
-				|&& (leaf_node_header, dir_item)|
-
-				! self.dir_items_recent.contains_key (
-					& leaf_node_header.key.object_id)
-
-			).map (
-				|& (leaf_node_header, dir_item)|
-
-				leaf_node_header.key.object_id
-
-			).collect ();
-
-		// print information about roots
-
-		for root_object_id in root_object_ids {
-
-			output.message (
-				& format! (
-					"ROOT: {}",
-					root_object_id));
-
-			self.print_tree (
-				output,
-				"  ",
-				root_object_id);
-
-		}
+		output.status_done ();
 
 	}
 
-	fn print_tree (
-		& self,
-		output: & mut OutputBox,
-		indent: & str,
-		object_id: i64,
-	) {
+	pub fn inode_items_recent (
+		& 'a self,
+	) -> & HashMap <i64, InodeItemAndKey <'a>> {
+		& self.inode_items_recent
+	}
 
-		if let Some (child_object_ids) =
-			self.dir_items_by_parent.get (
-				& object_id) {
+	pub fn dir_items_recent (
+		& 'a self,
+	) -> & HashMap <i64, DirItemAndKey <'a>> {
+		& self.dir_items_recent
+	}
 
-			let next_indent =
-				format! (
-					"{}  ",
-					indent);
-
-			for child_object_id
-				in self.dir_items_by_parent.get (
-					& object_id,
-				).unwrap () {
-
-				let & (child_leaf_node_header, child_dir_item) =
-					self.dir_items_recent.get (
-						child_object_id,
-					).unwrap ();
-
-				output.message (
-					& format! (
-						"{}{}",
-						indent,
-						String::from_utf8_lossy (
-							child_dir_item.name ())));
-
-				self.print_tree (
-					output,
-					& next_indent,
-					* child_object_id);
-
-			}
-
-		}
-
+	pub fn dir_items_by_parent (
+		& 'a self,
+	) -> & HashMap <i64, Vec <i64>> {
+		& self.dir_items_by_parent
 	}
 
 }

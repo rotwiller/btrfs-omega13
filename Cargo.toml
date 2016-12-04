@@ -6,6 +6,7 @@ authors = ["James Pharaoh <james@pharaoh.uk>"]
 [dependencies]
 btrfs = "*"
 clap = "*"
-output = "*"
+libc = "*"
 memmap = "*"
+output = "*"
 uuid = "*"

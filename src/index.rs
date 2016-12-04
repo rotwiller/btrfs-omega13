@@ -5,8 +5,8 @@ use std::io::BufWriter;
 use std::io::Read;
 use std::io::Write;
 use std::fs::File;
-use std::mem;
 use std::path::Path;
+use std::path::PathBuf;
 
 use btrfs::diskformat::*;
 
@@ -334,6 +334,81 @@ fn index_read (
 	}
 
 	Ok (())
+
+}
+
+pub fn load_index_and_mmaps (
+	output: & mut OutputBox,
+	index: & Path,
+	paths: & Vec <PathBuf>,
+) -> Result <(Vec <usize>, Vec <Mmap>), String> {
+
+	// load index
+
+	output.status (
+		& format! (
+			"Loading index from {} ...",
+			index.to_string_lossy ()));
+
+	let node_positions =
+		try! (
+			index_load (
+				& index));
+
+	output.clear_status ();
+
+	output.message (
+		& format! (
+			"Loading index from {} ... done",
+			index.to_string_lossy ()));
+
+	// open devices
+
+	let mut mmaps: Vec <Mmap> =
+		Vec::new ();
+
+	for path in paths.iter () {
+
+		let file = try! (
+			File::open (
+				path,
+			).map_err (
+				|error|
+
+				format! (
+					"Error opening {}: {}",
+					path.to_string_lossy (),
+					error.description ())
+
+			)
+		);
+
+		let mmap = try! (
+			Mmap::open (
+				& file,
+				Protection::Read,
+			).map_err (
+				|error|
+
+				format! (
+					"Error mmaping {}: {}",
+					path.to_string_lossy (),
+					error.description ())
+
+			)
+		);
+
+		mmaps.push (
+			mmap);
+
+	}
+
+	Ok (
+		(
+			node_positions,
+			mmaps,
+		)
+	)
 
 }
 
