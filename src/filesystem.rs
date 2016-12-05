@@ -8,14 +8,24 @@ use memmap::Mmap;
 
 use output::OutputBox;
 
-type InodeItemAndKey <'a> = (
-	& 'a BtrfsLeafNodeHeader,
-	& 'a BtrfsInodeItem,
-);
-
-type DirItemAndKey <'a> = (
+pub type DirItemAndKey <'a> = (
 	& 'a BtrfsLeafNodeHeader,
 	& 'a BtrfsDirItem,
+);
+
+pub type ExtentDataAndKey <'a> = (
+	& 'a BtrfsLeafNodeHeader,
+	& 'a BtrfsExtentData,
+);
+
+pub type ExtentItemAndKey <'a> = (
+	& 'a BtrfsLeafNodeHeader,
+	& 'a BtrfsExtentItem,
+);
+
+pub type InodeItemAndKey <'a> = (
+	& 'a BtrfsLeafNodeHeader,
+	& 'a BtrfsInodeItem,
 );
 
 pub struct Filesystem <'a> {
@@ -25,6 +35,9 @@ pub struct Filesystem <'a> {
 
 	item_index: HashMap <Rc <BtrfsKey>, Vec <usize>>,
 
+	extent_items: Vec <ExtentItemAndKey <'a>>,
+	extent_items_index: HashMap <u64, Vec <ExtentItemAndKey <'a>>>,
+
 	inode_items: Vec <InodeItemAndKey <'a>>,
 	inode_items_index: HashMap <i64, Vec <InodeItemAndKey <'a>>>,
 	inode_items_recent: HashMap <i64, InodeItemAndKey <'a>>,
@@ -33,6 +46,9 @@ pub struct Filesystem <'a> {
 	dir_items_index: HashMap <i64, Vec <DirItemAndKey <'a>>>,
 	dir_items_recent: HashMap <i64, DirItemAndKey <'a>>,
 	dir_items_by_parent: HashMap <i64, Vec <i64>>,
+
+	extent_datas: Vec <ExtentDataAndKey <'a>>,
+	extent_datas_index: HashMap <i64, Vec <ExtentDataAndKey <'a>>>,
 
 }
 
@@ -50,14 +66,20 @@ impl <'a> Filesystem <'a> {
 
 			item_index: HashMap::new (),
 
-			inode_items: Vec::new (),
-			inode_items_index: HashMap::new (),
-			inode_items_recent: HashMap::new (),
+			extent_datas: Vec::new (),
+			extent_datas_index: HashMap::new (),
+
+			extent_items: Vec::new (),
+			extent_items_index: HashMap::new (),
 
 			dir_items: Vec::new (),
 			dir_items_index: HashMap::new (),
 			dir_items_recent: HashMap::new (),
 			dir_items_by_parent: HashMap::new (),
+
+			inode_items: Vec::new (),
+			inode_items_index: HashMap::new (),
+			inode_items_recent: HashMap::new (),
 
 		}
 
@@ -140,36 +162,9 @@ impl <'a> Filesystem <'a> {
 
 				match leaf_node_header.key.item_type {
 
-					BTRFS_INODE_ITEM_TYPE => {
-
-						let inode_item: & BtrfsInodeItem = unsafe {
-							& * (
-								mmap.ptr ().offset (
-									item_data_position as isize,
-								) as * const BtrfsInodeItem
-							)
-						};
-
-						let inode_item_and_header = (
-							leaf_node_header,
-							inode_item,
-						);
-
-						self.inode_items.push (
-							inode_item_and_header);
-
-						self.inode_items_index.entry (
-							item_key.object_id,
-						).or_insert (
-							Vec::new (),
-						).push (
-							inode_item_and_header);
-
-					},
-
 					BTRFS_DIR_INDEX_TYPE => {
 
-						let dir_item: & BtrfsDirItem = unsafe {
+						let dir_item = unsafe {
 							& * (
 								mmap.ptr ().offset (
 									item_data_position as isize,
@@ -194,6 +189,87 @@ impl <'a> Filesystem <'a> {
 
 					},
 
+					BTRFS_EXTENT_DATA_TYPE => {
+
+						let extent_data = unsafe {
+							& * (
+								mmap.ptr ().offset (
+									item_data_position as isize,
+								) as * const BtrfsExtentData
+							)
+						};
+
+						let extent_data_and_header = (
+							leaf_node_header,
+							extent_data,
+						);
+
+						self.extent_datas.push (
+							extent_data_and_header);
+
+						self.extent_datas_index.entry (
+							item_key.object_id,
+						).or_insert (
+							Vec::new (),
+						).push (
+							extent_data_and_header);
+
+					},
+
+					BTRFS_EXTENT_ITEM_TYPE => {
+
+						let extent_item = unsafe {
+							& * (
+								mmap.ptr ().offset (
+									item_data_position as isize,
+								) as * const BtrfsExtentItem
+							)
+						};
+
+						let extent_item_and_header = (
+							leaf_node_header,
+							extent_item,
+						);
+
+						self.extent_items.push (
+							extent_item_and_header);
+
+						self.extent_items_index.entry (
+							item_key.object_id as u64,
+						).or_insert (
+							Vec::new (),
+						).push (
+							extent_item_and_header);
+
+					},
+
+					BTRFS_INODE_ITEM_TYPE => {
+
+						let inode_item = unsafe {
+							& * (
+								mmap.ptr ().offset (
+									item_data_position as isize,
+								) as * const BtrfsInodeItem
+							)
+						};
+
+						let inode_item_and_header = (
+							leaf_node_header,
+							inode_item,
+						);
+
+						self.inode_items.push (
+							inode_item_and_header);
+
+						self.inode_items_index.entry (
+							item_key.object_id,
+						).or_insert (
+							Vec::new (),
+						).push (
+							inode_item_and_header);
+
+					},
+
 					_ => (),
 
 				}
@@ -201,6 +277,13 @@ impl <'a> Filesystem <'a> {
 			}
 
 		}
+
+		output.message (
+			& format! (
+				"Found {} dir entries, {} inodes, {} extents",
+				self.dir_items.len (),
+				self.inode_items.len (),
+				self.extent_datas.len ()));
 
 		output.status_done ();
 
@@ -289,12 +372,6 @@ impl <'a> Filesystem <'a> {
 
 	}
 
-	pub fn inode_items_recent (
-		& 'a self,
-	) -> & HashMap <i64, InodeItemAndKey <'a>> {
-		& self.inode_items_recent
-	}
-
 	pub fn dir_items_recent (
 		& 'a self,
 	) -> & HashMap <i64, DirItemAndKey <'a>> {
@@ -305,6 +382,24 @@ impl <'a> Filesystem <'a> {
 		& 'a self,
 	) -> & HashMap <i64, Vec <i64>> {
 		& self.dir_items_by_parent
+	}
+
+	pub fn extent_datas_index (
+		& 'a self,
+	) -> & HashMap <i64, Vec <ExtentDataAndKey>> {
+		& self.extent_datas_index
+	}
+
+	pub fn extent_items_index (
+		& 'a self,
+	) -> & HashMap <u64, Vec <ExtentItemAndKey>> {
+		& self.extent_items_index
+	}
+
+	pub fn inode_items_recent (
+		& 'a self,
+	) -> & HashMap <i64, InodeItemAndKey <'a>> {
+		& self.inode_items_recent
 	}
 
 }
