@@ -1,11 +1,13 @@
 use std::collections::HashSet;
 
+use btrfs::diskformat::*;
+
 use output;
-use output::OutputBox;
+use output::Output;
 
 use arguments::*;
+use device_maps::*;
 use filesystem::*;
-use index::*;
 
 pub fn scan (
 	command: ScanCommand,
@@ -14,25 +16,28 @@ pub fn scan (
 	let mut output =
 		output::open ();
 
-	let (node_positions, mmaps) =
-		try! (
-			load_index_and_mmaps (
-				& mut output,
-				& command.index,
-				& command.paths));
+	// open devices
 
-	// reconstruct file system
+	let device_maps =
+		DeviceMaps::open (
+			& command.paths,
+		) ?;
 
-	let mut filesystem =
-		Filesystem::new (
-			& node_positions,
-			& mmaps);
+	let mut btrfs_device_map =
+		BtrfsDeviceMap::new ();
 
-	filesystem.build_main_index (
-		& mut output);
+	btrfs_device_map.insert (
+		1,
+		device_maps.get_data ().into_iter ().next ().unwrap ());
 
-	filesystem.build_dir_items_index (
-		& mut output);
+	// load filesystem
+
+	let filesystem =
+		Filesystem::load_with_index (
+			& mut output,
+			& command.index,
+			& btrfs_device_map,
+		) ?;
 
 	// print data
 
@@ -48,22 +53,22 @@ pub fn scan (
 
 fn print_roots (
 	filesystem: & Filesystem,
-	output: & mut OutputBox,
+	output: & Output,
 ) {
 
 	// find parent dir entries
 
-	let root_object_ids: HashSet <i64> =
+	let root_object_ids: HashSet <u64> =
 		filesystem.dir_items_recent ().values ().filter (
-			|&& (leaf_node_header, _dir_item)|
+			|&& dir_item|
 
 			! filesystem.dir_items_recent ().contains_key (
-				& leaf_node_header.key.object_id)
+				& dir_item.object_id ())
 
 		).map (
-			|& (leaf_node_header, _dir_item)|
+			|& dir_item|
 
-			leaf_node_header.key.object_id
+			dir_item.object_id ()
 
 		).collect ();
 
@@ -71,8 +76,8 @@ fn print_roots (
 
 	for root_object_id in root_object_ids {
 
-		output.message (
-			& format! (
+		output.message_format (
+			format_args! (
 				"ROOT: {}",
 				root_object_id));
 
@@ -88,9 +93,9 @@ fn print_roots (
 
 fn print_tree (
 	filesystem: & Filesystem,
-	output: & mut OutputBox,
+	output: & Output,
 	indent: & str,
-	object_id: i64,
+	object_id: u64,
 ) {
 
 	if let Some (child_object_ids) =
@@ -104,13 +109,13 @@ fn print_tree (
 
 		for child_object_id in child_object_ids {
 
-			let & (_child_leaf_node_header, child_dir_item) =
+			let child_dir_item =
 				filesystem.dir_items_recent ().get (
 					child_object_id,
 				).unwrap ();
 
-			output.message (
-				& format! (
+			output.message_format (
+				format_args! (
 					"{}{}",
 					indent,
 					String::from_utf8_lossy (

@@ -8,6 +8,7 @@ extern crate output;
 extern crate uuid;
 
 mod arguments;
+mod device_maps;
 mod filesystem;
 mod index;
 mod restore;

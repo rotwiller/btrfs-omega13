@@ -1,12 +1,22 @@
 [package]
-name = "btrfs-omega13"
-version = "0.1.0"
-authors = ["James Pharaoh <james@pharaoh.uk>"]
+
+	name = "btrfs-omega13"
+	version = "0.1.0"
+	authors = [
+		"James Pharaoh <james@pharaoh.uk>"
+	]
 
 [dependencies]
-btrfs = "*"
-clap = "*"
-libc = "*"
-memmap = "*"
-output = "*"
-uuid = "*"
+
+	btrfs = "*"
+	clap = "*"
+	libc = "*"
+	memmap = "*"
+	output = "*"
+	uuid = "*"
+
+[replace]
+
+	"btrfs:1.2.1" = { path = "../rust-btrfs" }
+
+# ex: noet ts=4 filetype = toml

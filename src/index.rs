@@ -6,7 +6,6 @@ use std::io::Read;
 use std::io::Write;
 use std::fs::File;
 use std::path::Path;
-use std::path::PathBuf;
 
 use btrfs::diskformat::*;
 
@@ -14,7 +13,7 @@ use memmap::Mmap;
 use memmap::Protection;
 
 use output;
-use output::OutputBox;
+use output::Output;
 
 use uuid::Uuid;
 
@@ -56,17 +55,17 @@ pub fn index (
 		)
 	);
 
-	try! (
-		index_write (
-			& node_positions,
-			& mut index_file));
+	index_write (
+		& node_positions,
+		& mut index_file,
+	) ?;
 
 	Ok (())
 
 }
 
 fn index_scan (
-	output: & mut OutputBox,
+	output: & Output,
 	node_positions: & mut Vec <usize>,
 	path: & Path,
 	offset: & mut usize,
@@ -103,8 +102,8 @@ fn index_scan (
 		)
 	);
 
-	output.message (
-		& format! (
+	output.message_format (
+		format_args! (
 			"Scanning {}",
 			path.to_string_lossy ()));
 
@@ -117,7 +116,7 @@ fn index_scan (
 		)
 	};
 
-	if superblock.magic != BTRFS_MAGIC {
+	if superblock.magic () != BTRFS_MAGIC {
 
 		return Err (
 			"Superblock not found".to_owned ());
@@ -126,24 +125,24 @@ fn index_scan (
 
 	// print fs information
 
-	output.message (
-		& format! (
+	output.message_format (
+		format_args! (
 			"Filesystem UUID: {}",
 			Uuid::from_bytes (
-				& superblock.fs_uuid,
+				& superblock.fs_uuid (),
 			).unwrap ()));
 
-	output.message (
-		& format! (
+	output.message_format (
+		format_args! (
 			"Node size: 0x{:x}",
-			superblock.node_size));
+			superblock.node_size ()));
 
-	output.message (
-		& format! (
+	output.message_format (
+		format_args! (
 			"Leaf size: 0x{:x}",
-			superblock.leaf_size));
+			superblock.leaf_size ()));
 
-	if superblock.node_size != superblock.leaf_size {
+	if superblock.node_size () != superblock.leaf_size () {
 
 		panic! (
 			"TODO - handle node size and leaf size different");
@@ -156,13 +155,13 @@ fn index_scan (
 		0x1_1000;
 
 	let max_position: usize =
-		mmap.len () - mmap.len () % superblock.node_size as usize;
+		mmap.len () - mmap.len () % superblock.node_size () as usize;
 
 	let status_size: usize =
-		superblock.sector_size as usize * 0x1000;
+		superblock.sector_size () as usize * 0x1000;
 
-	output.message (
-		& format! (
+	output.message_format (
+		format_args! (
 			"Scanning from 0x{:x} to 0x{:x}",
 			position,
 			max_position));
@@ -171,8 +170,8 @@ fn index_scan (
 
 		if position % status_size == 0 {
 
-			output.status (
-				& format! (
+			output.status_format (
+				format_args! (
 					"At position 0x{:x} ({}%)",
 					position,
 					position * 100 / mmap.len ()));
@@ -188,7 +187,7 @@ fn index_scan (
 		) {
 
 			position +=
-				superblock.sector_size as usize;
+				superblock.sector_size () as usize;
 
 			continue;
 
@@ -203,10 +202,10 @@ fn index_scan (
 			)
 		};
 
-		if node_header.fs_uuid != superblock.fs_uuid {
+		if node_header.fs_uuid () != superblock.fs_uuid () {
 
 			position +=
-				superblock.sector_size as usize;
+				superblock.sector_size () as usize;
 
 			continue;
 
@@ -214,11 +213,11 @@ fn index_scan (
 
 		// store it
 
-		output.message (
-			& format! (
+		output.message_format (
+			format_args! (
 				"Found node at 0x{:x} in tree {}",
 				position,
-				node_header.tree_id));
+				node_header.tree_id ()));
 
 		node_positions.push (
 			* offset + position);
@@ -226,7 +225,7 @@ fn index_scan (
 		// continue
 
 		position +=
-			superblock.sector_size as usize;
+			superblock.sector_size () as usize;
 
 	}
 
@@ -334,81 +333,6 @@ fn index_read (
 	}
 
 	Ok (())
-
-}
-
-pub fn load_index_and_mmaps (
-	output: & mut OutputBox,
-	index: & Path,
-	paths: & Vec <PathBuf>,
-) -> Result <(Vec <usize>, Vec <Mmap>), String> {
-
-	// load index
-
-	output.status (
-		& format! (
-			"Loading index from {} ...",
-			index.to_string_lossy ()));
-
-	let node_positions =
-		try! (
-			index_load (
-				& index));
-
-	output.clear_status ();
-
-	output.message (
-		& format! (
-			"Loading index from {} ... done",
-			index.to_string_lossy ()));
-
-	// open devices
-
-	let mut mmaps: Vec <Mmap> =
-		Vec::new ();
-
-	for path in paths.iter () {
-
-		let file = try! (
-			File::open (
-				path,
-			).map_err (
-				|error|
-
-				format! (
-					"Error opening {}: {}",
-					path.to_string_lossy (),
-					error.description ())
-
-			)
-		);
-
-		let mmap = try! (
-			Mmap::open (
-				& file,
-				Protection::Read,
-			).map_err (
-				|error|
-
-				format! (
-					"Error mmaping {}: {}",
-					path.to_string_lossy (),
-					error.description ())
-
-			)
-		);
-
-		mmaps.push (
-			mmap);
-
-	}
-
-	Ok (
-		(
-			node_positions,
-			mmaps,
-		)
-	)
 
 }
 
