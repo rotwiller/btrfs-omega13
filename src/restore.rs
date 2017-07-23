@@ -21,7 +21,7 @@ pub fn restore (
 	command: RestoreCommand,
 ) -> Result <(), String> {
 
-	// open devices
+	// open filesystem
 
 	let mmap_devices =
 		BtrfsMmapDeviceSet::open (
@@ -31,28 +31,87 @@ pub fn restore (
 	let mut devices =
 		mmap_devices.devices () ?;
 
-	// load filesystem
-
 	let filesystem =
 		BtrfsFilesystem::open_try_backups (
 			output,
 			& devices,
 		) ?;
 
-	let indexed_filesystem =
-		IndexedFilesystem::open (
-			output,
-			& filesystem,
-			& command.index,
+	// locate files to restore
+
+	let root_item =
+		filesystem.root_item (
+			command.subvolume_id,
+		).ok_or (
+
+			format! (
+				"Subvolume not found: {}",
+				command.subvolume_id)
+
 		) ?;
 
-	// restore files
+	let filesystem_tree =
+		filesystem.filesystem_tree (
+			command.subvolume_id,
+		).ok_or (
 
-	restore_children (
+			format! (
+				"Subvolume not found: {}",
+				command.subvolume_id)
+
+		) ?;
+
+	let mut object_id =
+		root_item.root_object_id ();
+
+	for path_part in command.source.iter () {
+
+		if path_part == "/" {
+			continue;
+		}
+
+		let dir_item_entry =
+			filesystem_tree.dir_item_entry (
+				object_id,
+				path_part.as_bytes (),
+			).ok_or (
+
+				format! (
+					"Path not found: {}",
+					command.source.to_string_lossy ())
+
+			) ?;
+
+		object_id =
+			dir_item_entry.child_object_id ();
+
+	}
+
+	let inode_item =
+		filesystem_tree.inode_item (
+			object_id,
+		).ok_or (
+
+			format! (
+				"Inode item not found: {}",
+				object_id)
+
+		) ?;
+
+	let output_job =
+		output_job_start! (
+			output,
+			"Restoring files");
+
+	restore_directory (
 		output,
-		& indexed_filesystem,
-		command.object_id as u64,
-		& command.target);
+		& filesystem_tree,
+		object_id,
+		& command.source,
+		& command.target,
+	) ?;
+
+	output_job.complete ();
 
 	// return
 
@@ -60,144 +119,134 @@ pub fn restore (
 
 }
 
-fn restore_children (
+fn restore_item <'a> (
 	output: & Output,
-	indexed_filesystem: & IndexedFilesystem,
-	object_id: u64,
+	filesystem_tree: & 'a BtrfsFilesystemTree <'a>,
+	dir_index: & 'a BtrfsDirIndex <'a>,
+	source: & Path,
 	target: & Path,
-) {
+) -> Result <(), String> {
 
-	let output_job =
-		output_job_start! (
-			output,
-			"Restoring files ...");
+	match dir_index.child_type () {
+
+		BTRFS_FT_REG_FILE =>
+			restore_regular_file (
+				output,
+				filesystem_tree,
+				dir_index.child_object_id (),
+				& source,
+				& target,
+			) ?,
+
+		BTRFS_FT_DIR =>
+			restore_directory (
+				output,
+				filesystem_tree,
+				dir_index.child_object_id (),
+				& source,
+				& target,
+			) ?,
+
+		BTRFS_FT_SYMLINK =>
+			output_message! (
+				output,
+				"TODO: symlink {}",
+				source.to_string_lossy ()),
+
+		_ =>
+			output_message! (
+				output,
+				"Unknown dir item entry type {}: {}",
+				dir_index.child_type (),
+				source.to_string_lossy ()),
+
+	}
+
+	Ok (())
+
+}
+
+fn restore_children <'a> (
+	output: & Output,
+	filesystem_tree: & 'a BtrfsFilesystemTree <'a>,
+	directory_id: u64,
+	source: & Path,
+	target: & Path,
+) -> Result <(), String> {
 
 	// iterate children
 
-	if let Some (child_object_ids) =
-		indexed_filesystem.dir_item_entries_by_parent ().get (
-			& object_id) {
+	for dir_index
+	in filesystem_tree.dir_indexes (
+		directory_id,
+	) {
 
-		for & child_object_id in child_object_ids {
+		let source =
+			source.join (
+				OsString::from_vec (
+					dir_index.name ().to_vec ()));
 
-			restore_dir_item (
-				output,
-				indexed_filesystem,
-				child_object_id,
-				target);
+		let target =
+			target.join (
+				OsString::from_vec (
+					dir_index.name ().to_vec ()));
 
-		}
-
-	}
-
-	output_job.complete ();
-
-}
-
-fn restore_dir_item (
-	output: & Output,
-	indexed_filesystem: & IndexedFilesystem,
-	object_id: u64,
-	target: & Path,
-) {
-
-	let dir_item_entry =
-		indexed_filesystem.dir_item_entries_recent ().get (
-			& object_id,
-		).unwrap ();
-
-	let target =
-		target.join (
-			OsString::from_vec (
-				dir_item_entry.name ().to_vec ()));
-
-	if let Some (inode_item) =
-		indexed_filesystem.inode_items_recent ().get (
-			& object_id) {
-
-		match dir_item_entry.child_type () {
-
-			BTRFS_CHILD_REGULAR_FILE_TYPE =>
-				restore_regular_file (
-					output,
-					indexed_filesystem,
-					object_id,
-					& target,
-					dir_item_entry,
-					inode_item),
-
-			BTRFS_CHILD_DIRECTORY_TYPE =>
-				restore_directory (
-					output,
-					indexed_filesystem,
-					object_id,
-					& target,
-					dir_item_entry,
-					inode_item),
-
-			BTRFS_CHILD_SYMBOLIC_LINK_TYPE => {
-
-				// TODO
-
-			},
-
-			_ => {
-
-				output.message_format (
-					format_args! (
-						"Unknown dir item entry type {}",
-						dir_item_entry.child_type ()));
-
-			},
-
-		}
-
-	} else {
-
-		output.message_format (
-			format_args! (
-				"Unable to get inode {} for {}",
-				object_id,
-				target.to_string_lossy ()));
+		restore_item (
+			output,
+			filesystem_tree,
+			& dir_index,
+			& source,
+			& target,
+		) ?;
 
 	}
 
+	Ok (())
+
 }
 
-fn restore_regular_file (
+fn restore_regular_file <'a> (
 	output: & Output,
-	indexed_filesystem: & IndexedFilesystem,
+	filesystem_tree: & 'a BtrfsFilesystemTree <'a>,
 	object_id: u64,
+	source: & Path,
 	target: & Path,
-	dir_item_entry: & BtrfsDirItemEntry,
-	inode_item: & BtrfsInodeItem,
-) {
+) -> Result <(), String> {
+
+	output_message! (
+		output,
+		"F {}",
+		target.to_string_lossy ());
+
+	let inode_item =
+		filesystem_tree.inode_item (
+			object_id,
+		).ok_or (
+
+			format! (
+				"Error finding inode {}",
+				object_id)
+
+		) ?;
 
 	// create file
 
-	let mut file = match (
+	let mut file =
 		File::create (
-			target)
-	) {
+			target,
+		).map_err (
+			|error|
 
-		Ok (file) => file,
+			format! (
+				"Error creating {}: {}",
+				target.to_string_lossy (),
+				error.description ())
 
-		Err (error) => {
-
-			output.message_format (
-				format_args! (
-					"Error creating {}: {}",
-					target.to_string_lossy (),
-					error.description ()));
-
-			return;
-
-		}
-
-	};
+		) ?;
 
 	// find contents
 
+	/*
 	if let Some (extent_datas) =
 		indexed_filesystem.extent_datas_index ().get (
 			& object_id) {
@@ -237,16 +286,24 @@ fn restore_regular_file (
 		}
 
 	}
+	*/
 
 	// set metadata
 
 	restore_metadata (
 		output,
+		& inode_item,
+		source,
 		target,
-		inode_item);
+	) ?;
+
+	// return
+
+	Ok (())
 
 }
 
+/*
 fn restore_extent_data (
 	output: & Output,
 	indexed_filesystem: & IndexedFilesystem,
@@ -426,15 +483,31 @@ fn restore_extent_data (
 	}
 
 }
+*/
 
-fn restore_directory (
+fn restore_directory <'a> (
 	output: & Output,
-	indexed_filesystem: & IndexedFilesystem,
+	filesystem_tree: & 'a BtrfsFilesystemTree <'a>,
 	object_id: u64,
+	source: & Path,
 	target: & Path,
-	dir_item_entry: & BtrfsDirItemEntry,
-	inode_item: & BtrfsInodeItem,
-) {
+) -> Result <(), String> {
+
+	output_message! (
+		output,
+		"D {}",
+		target.to_string_lossy ());
+
+	let inode_item =
+		filesystem_tree.inode_item (
+			object_id,
+		).ok_or (
+
+			format! (
+				"Error finding inode {}",
+				object_id)
+
+		) ?;
 
 	let target_c =
 		OsString::from_vec (
@@ -452,33 +525,38 @@ fn restore_directory (
 
 	if result != 0 {
 
-		output.message_format (
-			format_args! (
+		return Err (
+			format! (
 				"Error creating directory {}",
 				target.to_string_lossy ()));
-
-		return;
 
 	}
 
 	restore_children (
 		output,
-		indexed_filesystem,
+		filesystem_tree,
 		object_id,
-		& target);
+		source,
+		target,
+	) ?;
 
 	restore_metadata (
 		output,
+		& inode_item,
+		source,
 		target,
-		inode_item);
+	) ?;
+
+	Ok (())
 
 }
 
 fn restore_metadata (
 	output: & Output,
-	target: & Path,
 	inode_item: & BtrfsInodeItem,
-) {
+	source: & Path,
+	target: & Path,
+) -> Result <(), String> {
 
 	let target_c =
 		OsString::from_vec (
@@ -496,12 +574,10 @@ fn restore_metadata (
 
 	if result != 0 {
 
-		output.message_format (
-			format_args! (
+		return Err (
+			format! (
 				"Error setting mode on {}",
 				target.to_string_lossy ()));
-
-		return;
 
 	}
 
@@ -516,16 +592,16 @@ fn restore_metadata (
 
 	if result != 0 {
 
-		output.message_format (
-			format_args! (
+		return Err (
+			format! (
 				"Error setting ownership on {}",
 				target.to_string_lossy ()));
-
-		return;
 
 	}
 
 	// TODO times, etc
+
+	Ok (())
 
 }
 

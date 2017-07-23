@@ -13,8 +13,8 @@ pub struct ScanCommand {
 
 pub struct RestoreCommand {
 	pub paths: Vec <PathBuf>,
-	pub index: PathBuf,
-	pub object_id: i64,
+	pub subvolume_id: u64,
+	pub source: PathBuf,
 	pub target: PathBuf,
 }
 
@@ -98,12 +98,6 @@ fn restore_command (
 	restore_matches: & clap::ArgMatches,
 ) -> Command {
 
-	let index =
-		PathBuf::from (
-			restore_matches.value_of_os (
-				"index",
-			).unwrap ());
-
 	let paths =
 		restore_matches.values_of_os (
 			"path",
@@ -115,13 +109,19 @@ fn restore_command (
 
 		).collect ();
 
-	let object_id =
-		i64::from_str_radix (
+	let subvolume_id =
+		u64::from_str_radix (
 			restore_matches.value_of (
-				"object-id",
+				"subvolume-id",
 			).unwrap (),
 			10,
 		).unwrap ();
+
+	let source =
+		PathBuf::from (
+			restore_matches.value_of_os (
+				"source",
+			).unwrap ());
 
 	let target =
 		PathBuf::from (
@@ -132,8 +132,8 @@ fn restore_command (
 	Command::Restore (
 		RestoreCommand {
 			paths: paths,
-			index: index,
-			object_id: object_id,
+			subvolume_id: subvolume_id,
+			source: source,
 			target: target,
 		}
 	)
@@ -178,21 +178,19 @@ fn application <'a, 'b> (
 			.arg (index_argument ())
 			.arg (path_argument ())
 
-			.about (
-				"builds an index of btrfs nodes")
+			.about ("builds an index of btrfs nodes")
 
 		)
 
 		.subcommand (
 			clap::SubCommand::with_name ("restore")
 
-			.arg (index_argument ())
-			.arg (object_id_argument ())
+			.arg (subvolume_id_argument ())
+			.arg (source_argument ())
 			.arg (target_argument ())
 			.arg (path_argument ())
 
-			.about (
-				"Restores files using an index")
+			.about ("Restores files")
 
 		)
 
@@ -216,23 +214,21 @@ fn index_argument <'a, 'b> (
 		.value_name ("INDEX")
 		.required (false)
 
-		.help (
-			"Index file")
+		.help ("Index file")
 
 
 }
 
-fn object_id_argument <'a, 'b> (
+fn subvolume_id_argument <'a, 'b> (
 ) -> clap::Arg <'a, 'b> {
 
-	clap::Arg::with_name ("object-id")
+	clap::Arg::with_name ("subvolume-id")
 
-		.long ("object-id")
-		.value_name ("OBJECT-ID")
+		.long ("subvolume-id")
+		.value_name ("SUBVOLUME-ID")
 		.required (true)
 
-		.help (
-			"Object ID to restore")
+		.help ("Subvolume ID to restore")
 
 
 }
@@ -246,9 +242,21 @@ fn path_argument <'a, 'b> (
 		.required (true)
 		.multiple (true)
 
-		.help (
-			"Path to the BTRFS image(s) to recover")
+		.help ("Path to the BTRFS image(s) to recover")
 
+
+}
+
+fn source_argument <'a, 'b> (
+) -> clap::Arg <'a, 'b> {
+
+	clap::Arg::with_name ("source")
+
+		.long ("source")
+		.value_name ("SOURCE")
+		.required (true)
+
+		.help ("Source path to restore files from")
 
 }
 
@@ -261,8 +269,7 @@ fn target_argument <'a, 'b> (
 		.value_name ("TARGET")
 		.required (true)
 
-		.help (
-			"Target path to restore files to")
+		.help ("Target path to restore files to")
 
 }
 
