@@ -12,7 +12,6 @@ use btrfs::diskformat::*;
 use memmap::Mmap;
 use memmap::Protection;
 
-use output;
 use output::Output;
 
 use uuid::Uuid;
@@ -20,11 +19,9 @@ use uuid::Uuid;
 use arguments::*;
 
 pub fn index (
+	output: & Output,
 	command: IndexCommand,
 ) -> Result <(), String> {
-
-	let mut output =
-		output::open ();
 
 	let mut node_positions: Vec <usize> =
 		Vec::new ();
@@ -35,7 +32,7 @@ pub fn index (
 
 		try! (
 			index_scan (
-				& mut output,
+				output,
 				& mut node_positions,
 				& path,
 				& mut offset));
@@ -129,7 +126,7 @@ fn index_scan (
 		format_args! (
 			"Filesystem UUID: {}",
 			Uuid::from_bytes (
-				& superblock.fs_uuid (),
+				& superblock.fs_uuid ().bytes (),
 			).unwrap ()));
 
 	output.message_format (
@@ -160,21 +157,22 @@ fn index_scan (
 	let status_size: usize =
 		superblock.sector_size () as usize * 0x1000;
 
-	output.message_format (
-		format_args! (
+	let output_job =
+		output_job_start! (
+			output,
 			"Scanning from 0x{:x} to 0x{:x}",
 			position,
-			max_position));
+			max_position);
 
 	while position < max_position {
 
 		if position % status_size == 0 {
 
-			output.status_format (
-				format_args! (
-					"At position 0x{:x} ({}%)",
-					position,
-					position * 100 / mmap.len ()));
+			output_job_update! (
+				output_job,
+				"At position 0x{:x} ({}%)",
+				position,
+				position * 100 / mmap.len ());
 
 		}
 
@@ -213,11 +211,11 @@ fn index_scan (
 
 		// store it
 
-		output.message_format (
-			format_args! (
-				"Found node at 0x{:x} in tree {}",
-				position,
-				node_header.tree_id ()));
+		output_message! (
+			output,
+			"Found node at 0x{:x} in tree {}",
+			position,
+			node_header.tree_id ());
 
 		node_positions.push (
 			* offset + position);
@@ -231,7 +229,7 @@ fn index_scan (
 
 	// return
 
-	output.clear_status ();
+	output_job.complete ();
 
 	* offset += mmap.len ();
 

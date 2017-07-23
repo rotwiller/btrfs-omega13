@@ -2,48 +2,61 @@ use std::collections::HashSet;
 
 use btrfs::diskformat::*;
 
-use output;
 use output::Output;
 
-use arguments::*;
-use device_maps::*;
-use filesystem::*;
+use super::arguments::*;
+use super::indexed_filesystem::*;
 
 pub fn scan (
+	output: & Output,
 	command: ScanCommand,
 ) -> Result <(), String> {
 
-	let mut output =
-		output::open ();
+	// open filesystem
 
-	// open devices
-
-	let device_maps =
-		DeviceMaps::open (
+	let mmap_devices =
+		BtrfsMmapDeviceSet::open (
 			& command.paths,
 		) ?;
 
-	let mut btrfs_device_map =
-		BtrfsDeviceMap::new ();
-
-	btrfs_device_map.insert (
-		1,
-		device_maps.get_data ().into_iter ().next ().unwrap ());
-
-	// load filesystem
+	let devices =
+		mmap_devices.devices () ?;
 
 	let filesystem =
-		Filesystem::load_with_index (
-			& mut output,
-			& command.index,
-			& btrfs_device_map,
+		BtrfsFilesystem::open_try_backups (
+			output,
+			& devices,
 		) ?;
 
-	// print data
+	// print out subvolumes
 
-	print_roots (
-		& filesystem,
-		& mut output);
+	let default_subvolume_root_item =
+		filesystem.default_subvolume_root_item ().ok_or (
+			"No default subvolume root item"
+		) ?;
+
+	output_message! (
+		output,
+		"Subvolumes:");
+
+	output_message! (
+		output,
+		"  ROOT (5)");
+
+	for root_backref in filesystem.subvolume_root_backrefs () {
+
+		let path =
+			filesystem.subvolume_path (
+				root_backref,
+			) ?;
+
+		output_message! (
+			output,
+			"  {} ({})",
+			path.to_string_lossy (),
+			root_backref.object_id ());
+
+	}
 
 	// return
 
@@ -52,23 +65,23 @@ pub fn scan (
 }
 
 fn print_roots (
-	filesystem: & Filesystem,
+	indexed_filesystem: & IndexedFilesystem,
 	output: & Output,
 ) {
 
 	// find parent dir entries
 
 	let root_object_ids: HashSet <u64> =
-		filesystem.dir_items_recent ().values ().filter (
-			|&& dir_item|
+		indexed_filesystem.dir_item_entries_recent ().values ().filter (
+			|&& dir_item_entry|
 
-			! filesystem.dir_items_recent ().contains_key (
-				& dir_item.object_id ())
+			! indexed_filesystem.dir_item_entries_recent ().contains_key (
+				& dir_item_entry.object_id ())
 
 		).map (
-			|& dir_item|
+			|& dir_item_entry|
 
-			dir_item.object_id ()
+			dir_item_entry.object_id ()
 
 		).collect ();
 
@@ -82,24 +95,26 @@ fn print_roots (
 				root_object_id));
 
 		print_tree (
-			filesystem,
+			indexed_filesystem,
 			output,
 			"  ",
-			root_object_id);
+			root_object_id,
+			2);
 
 	}
 
 }
 
 fn print_tree (
-	filesystem: & Filesystem,
+	indexed_filesystem: & IndexedFilesystem,
 	output: & Output,
 	indent: & str,
 	object_id: u64,
+	max_depth: u64,
 ) {
 
 	if let Some (child_object_ids) =
-		filesystem.dir_items_by_parent ().get (
+		indexed_filesystem.dir_item_entries_by_parent ().get (
 			& object_id) {
 
 		let next_indent =
@@ -109,8 +124,8 @@ fn print_tree (
 
 		for child_object_id in child_object_ids {
 
-			let child_dir_item =
-				filesystem.dir_items_recent ().get (
+			let child_dir_item_entry =
+				indexed_filesystem.dir_item_entries_recent ().get (
 					child_object_id,
 				).unwrap ();
 
@@ -119,13 +134,18 @@ fn print_tree (
 					"{}{}",
 					indent,
 					String::from_utf8_lossy (
-						child_dir_item.name ())));
+						child_dir_item_entry.name ())));
 
-			print_tree (
-				filesystem,
-				output,
-				& next_indent,
-				* child_object_id);
+			if max_depth > 0 {
+
+				print_tree (
+					indexed_filesystem,
+					output,
+					& next_indent,
+					* child_object_id,
+					max_depth - 1);
+
+			}
 
 		}
 

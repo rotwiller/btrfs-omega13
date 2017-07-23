@@ -9,7 +9,6 @@ pub struct IndexCommand {
 
 pub struct ScanCommand {
 	pub paths: Vec <PathBuf>,
-	pub index: PathBuf,
 }
 
 pub struct RestoreCommand {
@@ -145,12 +144,6 @@ fn scan_command (
 	scan_matches: & clap::ArgMatches,
 ) -> Command {
 
-	let index =
-		PathBuf::from (
-			scan_matches.value_of_os (
-				"index",
-			).unwrap ());
-
 	let paths =
 		scan_matches.values_of_os (
 			"path",
@@ -165,7 +158,6 @@ fn scan_command (
 	Command::Scan (
 		ScanCommand {
 			paths: paths,
-			index: index,
 		}
 	)
 
@@ -207,12 +199,9 @@ fn application <'a, 'b> (
 		.subcommand (
 			clap::SubCommand::with_name ("scan")
 
-			.arg (index_argument ())
-
 			.arg (path_argument ())
 
-			.about (
-				"scans for files using an index")
+			.about ("Scans a filesystem")
 
 		)
 
@@ -225,7 +214,7 @@ fn index_argument <'a, 'b> (
 
 		.long ("index")
 		.value_name ("INDEX")
-		.required (true)
+		.required (false)
 
 		.help (
 			"Index file")

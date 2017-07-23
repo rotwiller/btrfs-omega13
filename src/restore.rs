@@ -11,48 +11,46 @@ use btrfs::diskformat::*;
 
 use libc;
 
-use output;
 use output::Output;
 
-use arguments::*;
-use device_maps::*;
-use filesystem::*;
+use super::arguments::*;
+use super::indexed_filesystem::*;
 
 pub fn restore (
+	output: & Output,
 	command: RestoreCommand,
 ) -> Result <(), String> {
 
-	let mut output =
-		output::open ();
-
 	// open devices
 
-	let device_maps =
-		DeviceMaps::open (
+	let mmap_devices =
+		BtrfsMmapDeviceSet::open (
 			& command.paths,
 		) ?;
 
-	let mut btrfs_device_map =
-		BtrfsDeviceMap::new ();
-
-	btrfs_device_map.insert (
-		1,
-		device_maps.get_data ().into_iter ().next ().unwrap ());
+	let mut devices =
+		mmap_devices.devices () ?;
 
 	// load filesystem
 
 	let filesystem =
-		Filesystem::load_with_index (
-			& mut output,
+		BtrfsFilesystem::open_try_backups (
+			output,
+			& devices,
+		) ?;
+
+	let indexed_filesystem =
+		IndexedFilesystem::open (
+			output,
+			& filesystem,
 			& command.index,
-			& btrfs_device_map,
 		) ?;
 
 	// restore files
 
 	restore_children (
-		& mut output,
-		& filesystem,
+		output,
+		& indexed_filesystem,
 		command.object_id as u64,
 		& command.target);
 
@@ -64,25 +62,27 @@ pub fn restore (
 
 fn restore_children (
 	output: & Output,
-	filesystem: & Filesystem,
+	indexed_filesystem: & IndexedFilesystem,
 	object_id: u64,
 	target: & Path,
 ) {
 
-	output.status (
-		"Restoring files ...");
+	let output_job =
+		output_job_start! (
+			output,
+			"Restoring files ...");
 
 	// iterate children
 
 	if let Some (child_object_ids) =
-		filesystem.dir_items_by_parent ().get (
+		indexed_filesystem.dir_item_entries_by_parent ().get (
 			& object_id) {
 
 		for & child_object_id in child_object_ids {
 
 			restore_dir_item (
 				output,
-				filesystem,
+				indexed_filesystem,
 				child_object_id,
 				target);
 
@@ -90,47 +90,49 @@ fn restore_children (
 
 	}
 
+	output_job.complete ();
+
 }
 
 fn restore_dir_item (
 	output: & Output,
-	filesystem: & Filesystem,
+	indexed_filesystem: & IndexedFilesystem,
 	object_id: u64,
 	target: & Path,
 ) {
 
-	let dir_item =
-		filesystem.dir_items_recent ().get (
+	let dir_item_entry =
+		indexed_filesystem.dir_item_entries_recent ().get (
 			& object_id,
 		).unwrap ();
 
 	let target =
 		target.join (
 			OsString::from_vec (
-				dir_item.name ().to_vec ()));
+				dir_item_entry.name ().to_vec ()));
 
 	if let Some (inode_item) =
-		filesystem.inode_items_recent ().get (
+		indexed_filesystem.inode_items_recent ().get (
 			& object_id) {
 
-		match dir_item.child_type () {
+		match dir_item_entry.child_type () {
 
 			BTRFS_CHILD_REGULAR_FILE_TYPE =>
 				restore_regular_file (
 					output,
-					filesystem,
+					indexed_filesystem,
 					object_id,
 					& target,
-					dir_item,
+					dir_item_entry,
 					inode_item),
 
 			BTRFS_CHILD_DIRECTORY_TYPE =>
 				restore_directory (
 					output,
-					filesystem,
+					indexed_filesystem,
 					object_id,
 					& target,
-					dir_item,
+					dir_item_entry,
 					inode_item),
 
 			BTRFS_CHILD_SYMBOLIC_LINK_TYPE => {
@@ -143,8 +145,8 @@ fn restore_dir_item (
 
 				output.message_format (
 					format_args! (
-						"Unknown dir item type {}",
-						dir_item.child_type ()));
+						"Unknown dir item entry type {}",
+						dir_item_entry.child_type ()));
 
 			},
 
@@ -164,10 +166,10 @@ fn restore_dir_item (
 
 fn restore_regular_file (
 	output: & Output,
-	filesystem: & Filesystem,
+	indexed_filesystem: & IndexedFilesystem,
 	object_id: u64,
 	target: & Path,
-	dir_item: & BtrfsDirItem,
+	dir_item_entry: & BtrfsDirItemEntry,
 	inode_item: & BtrfsInodeItem,
 ) {
 
@@ -197,7 +199,7 @@ fn restore_regular_file (
 	// find contents
 
 	if let Some (extent_datas) =
-		filesystem.extent_datas_index ().get (
+		indexed_filesystem.extent_datas_index ().get (
 			& object_id) {
 
 		let mut file_position: u64 = 0;
@@ -224,7 +226,7 @@ fn restore_regular_file (
 
 			restore_extent_data (
 				output,
-				filesystem,
+				indexed_filesystem,
 				target,
 				extent_data,
 				& mut file);
@@ -247,7 +249,7 @@ fn restore_regular_file (
 
 fn restore_extent_data (
 	output: & Output,
-	filesystem: & Filesystem,
+	indexed_filesystem: & IndexedFilesystem,
 	target: & Path,
 	extent_data: & BtrfsExtentData,
 	file: & mut File,
@@ -300,7 +302,7 @@ fn restore_extent_data (
 		BTRFS_EXTENT_DATA_REGULAR_TYPE => {
 
 			let extent_items: Option <& Vec <BtrfsExtentItem>> =
-				filesystem.extent_items_index ().get (
+				indexed_filesystem.extent_items_index ().get (
 					& extent_data.logical_address ());
 
 			if extent_items.is_none () {
@@ -427,10 +429,10 @@ fn restore_extent_data (
 
 fn restore_directory (
 	output: & Output,
-	filesystem: & Filesystem,
+	indexed_filesystem: & IndexedFilesystem,
 	object_id: u64,
 	target: & Path,
-	dir_item: & BtrfsDirItem,
+	dir_item_entry: & BtrfsDirItemEntry,
 	inode_item: & BtrfsInodeItem,
 ) {
 
@@ -461,7 +463,7 @@ fn restore_directory (
 
 	restore_children (
 		output,
-		filesystem,
+		indexed_filesystem,
 		object_id,
 		& target);
 
