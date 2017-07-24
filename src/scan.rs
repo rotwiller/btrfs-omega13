@@ -47,7 +47,7 @@ pub fn scan (
 
 		let path =
 			filesystem.subvolume_path (
-				root_backref,
+				& root_backref,
 			) ?;
 
 		output_message! (

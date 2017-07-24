@@ -1,5 +1,12 @@
 #![ allow (unused_parens) ]
 
+#![ deny (non_camel_case_types) ]
+#![ deny (non_snake_case) ]
+#![ deny (non_upper_case_globals) ]
+#![ deny (unreachable_patterns) ]
+#![ deny (unused_comparisons) ]
+#![ deny (unused_must_use) ]
+
 extern crate btrfs;
 extern crate clap;
 extern crate crc;

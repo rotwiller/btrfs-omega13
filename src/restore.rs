@@ -1,11 +1,16 @@
 use std::collections::HashSet;
 use std::error::Error;
+use std::ffi::OsStr;
 use std::ffi::OsString;
 use std::fs::File;
+use std::io::Cursor;
+use std::io::Seek;
+use std::io::SeekFrom;
 use std::io::Write;
 use std::path::Path;
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::ffi::OsStringExt;
+use std::os::unix::fs as unix_fs;
 
 use btrfs::diskformat::*;
 
@@ -61,8 +66,11 @@ pub fn restore (
 
 		) ?;
 
-	let mut object_id =
+	let mut child_object_id =
 		root_item.root_object_id ();
+
+	let mut child_type =
+		BTRFS_FT_DIR;
 
 	for path_part in command.source.iter () {
 
@@ -72,7 +80,7 @@ pub fn restore (
 
 		let dir_item_entry =
 			filesystem_tree.dir_item_entry (
-				object_id,
+				child_object_id,
 				path_part.as_bytes (),
 			).ok_or (
 
@@ -82,31 +90,25 @@ pub fn restore (
 
 			) ?;
 
-		object_id =
+		child_object_id =
 			dir_item_entry.child_object_id ();
 
+		child_type =
+			dir_item_entry.child_type ();
+
 	}
-
-	let inode_item =
-		filesystem_tree.inode_item (
-			object_id,
-		).ok_or (
-
-			format! (
-				"Inode item not found: {}",
-				object_id)
-
-		) ?;
 
 	let output_job =
 		output_job_start! (
 			output,
 			"Restoring files");
 
-	restore_directory (
+	restore_item (
 		output,
+		& filesystem,
 		& filesystem_tree,
-		object_id,
+		child_type,
+		child_object_id,
 		& command.source,
 		& command.target,
 	) ?;
@@ -121,19 +123,22 @@ pub fn restore (
 
 fn restore_item <'a> (
 	output: & Output,
+	filesystem: & 'a BtrfsFilesystem,
 	filesystem_tree: & 'a BtrfsFilesystemTree <'a>,
-	dir_index: & 'a BtrfsDirIndex <'a>,
+	child_type: u8,
+	child_object_id: u64,
 	source: & Path,
 	target: & Path,
 ) -> Result <(), String> {
 
-	match dir_index.child_type () {
+	match child_type {
 
 		BTRFS_FT_REG_FILE =>
 			restore_regular_file (
 				output,
+				filesystem,
 				filesystem_tree,
-				dir_index.child_object_id (),
+				child_object_id,
 				& source,
 				& target,
 			) ?,
@@ -141,24 +146,29 @@ fn restore_item <'a> (
 		BTRFS_FT_DIR =>
 			restore_directory (
 				output,
+				filesystem,
 				filesystem_tree,
-				dir_index.child_object_id (),
+				child_object_id,
 				& source,
 				& target,
 			) ?,
 
 		BTRFS_FT_SYMLINK =>
-			output_message! (
+			restore_symlink (
 				output,
-				"TODO: symlink {}",
-				source.to_string_lossy ()),
+				filesystem,
+				filesystem_tree,
+				child_object_id,
+				& source,
+				& target,
+			) ?,
 
 		_ =>
 			output_message! (
 				output,
-				"Unknown dir item entry type {}: {}",
-				dir_index.child_type (),
-				source.to_string_lossy ()),
+				"Can't restore item {} of type: {}",
+				source.to_string_lossy (),
+				child_type),
 
 	}
 
@@ -168,6 +178,7 @@ fn restore_item <'a> (
 
 fn restore_children <'a> (
 	output: & Output,
+	filesystem: & 'a BtrfsFilesystem,
 	filesystem_tree: & 'a BtrfsFilesystemTree <'a>,
 	directory_id: u64,
 	source: & Path,
@@ -191,13 +202,24 @@ fn restore_children <'a> (
 				OsString::from_vec (
 					dir_index.name ().to_vec ()));
 
-		restore_item (
-			output,
-			filesystem_tree,
-			& dir_index,
-			& source,
-			& target,
-		) ?;
+		if let Err (error) =
+			restore_item (
+				output,
+				filesystem,
+				filesystem_tree,
+				dir_index.child_type (),
+				dir_index.child_object_id (),
+				& source,
+				& target,
+			) {
+
+			output_message! (
+				output,
+				"Error restoring {}: {}",
+				target.to_string_lossy (),
+				error);
+
+		}
 
 	}
 
@@ -207,6 +229,7 @@ fn restore_children <'a> (
 
 fn restore_regular_file <'a> (
 	output: & Output,
+	filesystem: & 'a BtrfsFilesystem,
 	filesystem_tree: & 'a BtrfsFilesystemTree <'a>,
 	object_id: u64,
 	source: & Path,
@@ -244,49 +267,17 @@ fn restore_regular_file <'a> (
 
 		) ?;
 
-	// find contents
+	// restore contents
 
-	/*
-	if let Some (extent_datas) =
-		indexed_filesystem.extent_datas_index ().get (
-			& object_id) {
-
-		let mut file_position: u64 = 0;
-
-		for extent_data in extent_datas {
-
-			output.message_format (
-				format_args! (
-					"file position: {}",
-					file_position));
-
-			if extent_data.offset () != file_position {
-
-				output.message_format (
-					format_args! (
-						"Extents not in order for {}: expected {}, but got {}",
-						target.to_string_lossy (),
-						file_position,
-						extent_data.offset ()));
-
-				return;
-
-			}
-
-			restore_extent_data (
-				output,
-				indexed_filesystem,
-				target,
-				extent_data,
-				& mut file);
-
-			file_position +=
-				extent_data.logical_data_size ();
-
-		}
-
-	}
-	*/
+	restore_file_contents (
+		output,
+		filesystem,
+		filesystem_tree,
+		& inode_item,
+		& mut file,
+		source,
+		target,
+	) ?;
 
 	// set metadata
 
@@ -295,6 +286,7 @@ fn restore_regular_file <'a> (
 		& inode_item,
 		source,
 		target,
+		false,
 	) ?;
 
 	// return
@@ -303,190 +295,209 @@ fn restore_regular_file <'a> (
 
 }
 
-/*
-fn restore_extent_data (
+fn restore_file_contents <'a, FileType: Write + Seek> (
 	output: & Output,
-	indexed_filesystem: & IndexedFilesystem,
+	filesystem: & 'a BtrfsFilesystem,
+	filesystem_tree: & 'a BtrfsFilesystemTree <'a>,
+	inode_item: & 'a BtrfsInodeItem <'a>,
+	file: & mut FileType,
+	source: & Path,
 	target: & Path,
+) -> Result <(), String> {
+
+	let mut file_position: u64 = 0;
+
+	for extent_data
+	in filesystem_tree.extent_datas (
+		inode_item.object_id (),
+	) {
+
+		if extent_data.offset () != file_position {
+
+			return Err (
+				format! (
+					"Extent data position error creating {}: expected 0x{:x}, \
+					got 0x{:x}",
+					target.to_string_lossy (),
+					file_position,
+					extent_data.offset ()));
+
+		}
+
+		match restore_extent_data (
+			output,
+			filesystem,
+			filesystem_tree,
+			& extent_data,
+			inode_item.st_size () - file_position,
+			file,
+			source,
+			target,
+		) {
+
+			Ok (bytes_restored) =>
+				file_position +=
+					bytes_restored,
+
+			Err (error) => {
+
+				output_message! (
+					output,
+					"Error writing {} @ 0x{:x}: {}",
+					target.to_string_lossy (),
+					file_position,
+					error);
+
+				return Ok (())
+
+			},
+
+		}
+
+		if file_position > inode_item.st_size () {
+			break;
+		}
+
+	}
+
+	Ok (())
+
+}
+
+fn restore_extent_data <'a, FileType: Write + Seek> (
+	output: & Output,
+	filesystem: & 'a BtrfsFilesystem,
+	filesystem_tree: & 'a BtrfsFilesystemTree <'a>,
 	extent_data: & BtrfsExtentData,
-	file: & mut File,
-) {
+	file_size_remaining: u64,
+	file: & mut FileType,
+	source: & Path,
+	target: & Path,
+) -> Result <u64, String> {
 
 	match extent_data.extent_type () {
 
 		BTRFS_EXTENT_DATA_INLINE_TYPE => {
 
-			let inline_data = match (
-				extent_data.inline_data ()
-			) {
+			let inline_data =
+				extent_data.inline_data ().map_err (
+					|error|
 
-				Ok (Some (data)) =>
-					data,
+					format! (
+						"Error restoring {}: {}",
+						target.to_string_lossy (),
+						error)
 
-				Ok (None) =>
-					panic! (),
+				) ?.unwrap ();
 
-				Err (error) => {
+			file.write_all (
+				inline_data.as_ref (),
+			).map_err (
+				|error|
 
-					output.message_format (
-						format_args! (
-							"Error restoring {}: {}",
-							target.to_string_lossy (),
-							error));
+				format! (
+					"Error writing data to {}",
+					target.to_string_lossy ())
 
-					return;
+			) ?;
 
-				},
-
-			};
-
-			if let Err (error) = (
-				file.write_all (
-					inline_data.as_ref ())
-			) {
-
-				output.message_format (
-					format_args! (
-						"Error writing data to {}",
-						target.to_string_lossy ()));
-
-				return;
-
-			}
+			Ok (inline_data.len () as u64)
 
 		},
 
 		BTRFS_EXTENT_DATA_REGULAR_TYPE => {
 
-			let extent_items: Option <& Vec <BtrfsExtentItem>> =
-				indexed_filesystem.extent_items_index ().get (
-					& extent_data.logical_address ());
+			if extent_data.extent_logical_address () != 0 {
 
-			if extent_items.is_none () {
+				let raw_data =
+					filesystem.slice_at_logical_address (
+						extent_data.extent_logical_address (),
+						extent_data.extent_size () as usize,
+					) ?;
 
-				output.message_format (
-					format_args! (
-						"Missing extent item {} for {}",
-						extent_data.logical_address (),
-						target.to_string_lossy ()));
+				let uncompressed_data =
+					btrfs_decompress_pages (
+						extent_data.compression (),
+						raw_data,
+						extent_data.extent_data_size (),
+					) ?;
 
-				return;
+				let uncompressed_end_position =
+					extent_data.extent_data_offset ()
+						+ extent_data.extent_data_size ();
 
-			}
+				if uncompressed_end_position
+					> uncompressed_data.len () as u64 {
 
-			let extent_items =
-				extent_items.unwrap ();
-
-			let extent_items: HashSet <& BtrfsExtentItem> =
-				extent_items.into_iter ().filter (
-					|&& extent_item|
-
-					extent_item.offset () as u64
-						== extent_data.extent_size ()
-
-				).collect ();
-
-			let extent_items: Vec <& BtrfsExtentItem> =
-				extent_items.into_iter ().collect ();
-
-			if extent_items.is_empty () {
-
-				output.message_format (
-					format_args! (
-						"Missing extent item {} for {}",
-						extent_data.logical_address (),
-						target.to_string_lossy ()));
-
-				return;
-
-			}
-
-			let max_generation =
-				extent_items.iter ().map (
-					|& extent_item|
-
-					extent_item.generation ()
-
-				).max ().unwrap ();
-
-			let extent_items: Vec <& BtrfsExtentItem> =
-				extent_items.into_iter ().filter (
-					|& extent_item|
-
-					extent_item.generation () == max_generation
-
-				).collect ();
-
-			let max_reference_count =
-				extent_items.iter ().map (
-					|& extent_item|
-
-					extent_item.reference_count ()
-
-				).max ().unwrap ();
-
-			let extent_items: Vec <& BtrfsExtentItem> =
-				extent_items.into_iter ().filter (
-					|& extent_item|
-
-					extent_item.reference_count () == max_reference_count
-
-				).collect ();
-
-			if extent_items.len () > 1 {
-
-				output.message_format (
-					format_args! (
-						"Multiple extent items {} for {}",
-						extent_data.logical_address (),
-						target.to_string_lossy ()));
-
-				for & extent_item
-				in extent_items.iter () {
-
-					output.message_format (
-						format_args! (
-							"  Generation {} ref count {} flags {} first \
-							entry key {:?} level {}",
-							extent_item.generation (),
-							extent_item.reference_count (),
-							extent_item.flags (),
-							extent_item.first_entry_key (),
-							extent_item.level ()));
-
+					return Err (
+						"TODO".to_string ());
 				}
 
-				return;
+				file.write_all (
+					& uncompressed_data.as_ref () [
+						extent_data.extent_data_offset () as usize
+					..
+						uncompressed_end_position as usize
+					],
+				).map_err (
+					|error|
+
+					format! (
+						"Error writing data to {}: {}",
+						target.to_string_lossy (),
+						error.description ())
+
+				) ?;
+
+				Ok (extent_data.extent_data_size ())
+
+			} else {
+
+				// sparse extent
+
+				file.seek (
+					SeekFrom::Current (
+						extent_data.extent_data_size () as i64),
+				).map_err (
+					|error|
+
+					format! (
+						"Error seeking past sparse extent in {}: {}",
+						target.to_string_lossy (),
+						error.description ())
+
+				) ?;
+
+				Ok (extent_data.extent_data_size ())
 
 			}
-
-			// TODO write extent data
 
 		},
 
 		BTRFS_EXTENT_DATA_PREALLOC_TYPE => {
 
-			// TODO ignore?
+			Ok (0)
 
 		},
 
 		_ => {
 
-			output.message_format (
-				format_args! (
+			Err (
+				format! (
 					"Invalid extent data type {} in {}",
 					extent_data.extent_type (),
-					target.to_string_lossy ()));
+					target.to_string_lossy ()))
 
 		}
 
 	}
 
 }
-*/
+
 
 fn restore_directory <'a> (
 	output: & Output,
+	filesystem: & 'a BtrfsFilesystem,
 	filesystem_tree: & 'a BtrfsFilesystemTree <'a>,
 	object_id: u64,
 	source: & Path,
@@ -532,17 +543,23 @@ fn restore_directory <'a> (
 
 	}
 
-	restore_children (
-		output,
-		filesystem_tree,
-		object_id,
-		source,
-		target,
-	) ?;
+	// set metadata
 
 	restore_metadata (
 		output,
 		& inode_item,
+		source,
+		target,
+		false,
+	) ?;
+
+	// recurse
+
+	restore_children (
+		output,
+		filesystem,
+		filesystem_tree,
+		object_id,
 		source,
 		target,
 	) ?;
@@ -556,6 +573,7 @@ fn restore_metadata (
 	inode_item: & BtrfsInodeItem,
 	source: & Path,
 	target: & Path,
+	link: bool,
 ) -> Result <(), String> {
 
 	let target_c =
@@ -564,27 +582,10 @@ fn restore_metadata (
 				.chain (b"\0".to_vec ().into_iter ())
 				.collect ());
 
-	// set mode
-
-	let result = unsafe {
-		libc::chmod (
-			target_c.as_bytes ().as_ptr () as * const i8,
-			inode_item.st_mode ())
-	};
-
-	if result != 0 {
-
-		return Err (
-			format! (
-				"Error setting mode on {}",
-				target.to_string_lossy ()));
-
-	}
-
 	// set ownership
 
 	let result = unsafe {
-		libc::chown (
+		libc::lchown (
 			target_c.as_bytes ().as_ptr () as * const i8,
 			inode_item.st_uid (),
 			inode_item.st_gid ())
@@ -599,7 +600,128 @@ fn restore_metadata (
 
 	}
 
-	// TODO times, etc
+	if ! link {
+
+		// set mode
+
+		let result = unsafe {
+			libc::chmod (
+				target_c.as_bytes ().as_ptr () as * const i8,
+				inode_item.st_mode ())
+		};
+
+		if result != 0 {
+
+			return Err (
+				format! (
+					"Error setting mode on {}",
+					target.to_string_lossy ()));
+
+		}
+
+		// set times
+
+		let result = unsafe {
+			libc::utime (
+				target_c.as_bytes ().as_ptr () as * const i8,
+				& libc::utimbuf {
+					actime: inode_item.st_atime ().seconds (),
+					modtime: inode_item.st_mtime ().seconds (),
+				},
+			)
+		};
+
+		if result != 0 {
+
+			return Err (
+				format! (
+					"Error setting times on {}",
+					target.to_string_lossy ()));
+
+		}
+
+	}
+
+	// return
+
+	Ok (())
+
+}
+
+fn restore_symlink <'a> (
+	output: & Output,
+	filesystem: & 'a BtrfsFilesystem,
+	filesystem_tree: & 'a BtrfsFilesystemTree <'a>,
+	object_id: u64,
+	source: & Path,
+	target: & Path,
+) -> Result <(), String> {
+
+	output_message! (
+		output,
+		"S {} (TODO)",
+		target.to_string_lossy ());
+
+	let inode_item =
+		filesystem_tree.inode_item (
+			object_id,
+		).ok_or (
+
+			format! (
+				"Error finding inode {}",
+				object_id)
+
+		) ?;
+
+	// restore to memory buffer
+
+	let mut buffer: Vec <u8> =
+		Vec::new ();
+
+	let mut buffer_cursor =
+		Cursor::new (
+			buffer);
+
+	restore_file_contents (
+		output,
+		filesystem,
+		filesystem_tree,
+		& inode_item,
+		& mut buffer_cursor,
+		source,
+		target,
+	) ?;
+
+	let buffer =
+		buffer_cursor.into_inner ();
+
+	// create symlink
+
+	unix_fs::symlink (
+		Path::new (
+			OsStr::from_bytes (
+				& buffer)),
+		target,
+	).map_err (
+		|error|
+
+		format! (
+			"Error creating symlink: {}",
+			error.description ())
+
+	) ?;
+
+	// set metadata
+
+	restore_metadata (
+		output,
+		& inode_item,
+		source,
+		target,
+		true,
+	) ?;
+
+	// return
 
 	Ok (())
 
